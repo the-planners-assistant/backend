@@ -1,0 +1,40 @@
+backend/
+│
+├── app/                     # Main application package
+│   │
+│   ├── __init__.py          # Makes 'app' a Python package
+│   │
+│   ├── main.py              # FastAPI app creation, middleware, includes routers
+│   │
+│   ├── core/                # Core utilities like configuration
+│   │   ├── __init__.py
+│   │   └── config.py        # Pydantic settings management (loads .env)
+│   │
+│   ├── data/                # Mock or potentially static data
+│   │   ├── __init__.py
+│   │   └── mock_data.py     # Mock constraints, policies, etc.
+│   │
+│   ├── models/              # Data models (Pydantic Schemas)
+│   │   ├── __init__.py
+│   │   └── schemas.py       # Pydantic models for API requests/responses
+│   │
+│   ├── routers/             # API endpoint definitions (using APIRouter)
+│   │   ├── __init__.py
+│   │   ├── constraints.py   # Endpoints for /constraints
+│   │   ├── policies.py      # Endpoints for /policies
+│   │   └── reporting.py     # Endpoints for /reporting
+│   │   # Add more routers as needed (e.g., scenarios.py, plans.py) ...
+│   │
+│   └── services/            # Business logic layer
+│       ├── __init__.py
+│       ├── constraints_service.py # Logic for constraint checking (DB/GIS calls)
+│       ├── policies_service.py    # Logic for policy retrieval/analysis (DB/AI calls)
+│       └── reporting_service.py   # Logic for generating reports (AI/DB/GIS calls)
+│       # Add more services as needed ...
+│
+├── tests/                   # Directory for automated tests (using pytest)
+│   │ # (Add test structure here later) ...
+│
+├── .env                     # Environment variables (DB URLs, API keys) - Gitignored
+├── .gitignore               # Standard Python/Node gitignore
+└── requirements.txt         # Python package dependencies

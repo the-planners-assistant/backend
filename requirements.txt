@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings # For loading .env files
+celery[redis] # Adds celery and redis client library
+
+# Add other dependencies as needed later:
+# SQLAlchemy
+# GeoAlchemy2
+# asyncpg # Async driver for PostgreSQL
+# requests # For calling external APIs
+# openai # Or other AI library clients

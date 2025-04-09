@@ -1,0 +1,1 @@
+You need to run pip install -r requirements.txt and start both the Uvicorn server (uvicorn app.main:app --reload) and at least one Celery worker (celery -A app.celery_app worker --loglevel=info) from the backend directory. You also need a Redis server running.
