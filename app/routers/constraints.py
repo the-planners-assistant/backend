@@ -1,45 +1,53 @@
 # app/routers/constraints.py
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends # Import Depends
 from typing import List
+import asyncpg # Import asyncpg for type hinting
 
-from app.models import schemas # Import schemas
-from app.services import constraints_service # Import the specific service
-from app.core.config import settings # Import settings for API prefix
+from app.models import schemas
+from app.services import constraints_service
+# Import the dependency function (adjust path if necessary)
+from app.db import get_db_connection
 
 # Define the router
 router = APIRouter(
-    # prefix is now handled globally in main.py
-    tags=["Constraints"], # Tag for API documentation
-    responses={404: {"description": "Not found"}}, # Example default response
+    tags=["Constraints"],
+    responses={404: {"description": "Not found"}},
 )
 
 @router.post(
-    "/constraints", # Endpoint path relative to global prefix
-    response_model=schemas.ConstraintsResponse, # Use schema for response validation
+    "/constraints",
+    response_model=schemas.ConstraintsResponse,
     summary="Get Planning Constraints",
     description="Retrieves relevant planning constraints based on geographic location."
 )
-async def get_constraints(location: schemas.LocationInput):
+async def get_constraints(
+    location: schemas.LocationInput,
+    # *** Declare the database connection dependency here ***
+    conn: asyncpg.Connection = Depends(get_db_connection)
+):
     """
     API endpoint to fetch constraints.
     - **location**: Input latitude and longitude.
+    - **conn**: Database connection injected by FastAPI.
     """
     try:
         print(f"ROUTER: Received constraints request for {location.model_dump_json()}")
-        # Call the service layer function
-        constraints_list = await constraints_service.get_constraints_for_location(location)
+        print(f"ROUTER DEBUG: Type of 'conn' received from DI: {type(conn)}") # Debug point
 
-        # Structure the response using the Pydantic model
+        # *** Pass the resolved connection 'conn' to the service function ***
+        constraints_list = await constraints_service.get_constraints_for_location(location=location, conn=conn)
+
         response_data = schemas.ConstraintsResponse(
             location=location,
             constraints=constraints_list
         )
         print(f"ROUTER: Sending {len(constraints_list)} constraints.")
         return response_data
+    except HTTPException as http_exc:
+        # Re-raise HTTPExceptions raised by the service layer or dependency
+        raise http_exc
     except Exception as e:
-        # Basic error handling - add more specific exceptions later
-        print(f"ROUTER: Error fetching constraints: {type(e).__name__} - {e}")
-        # Consider logging the full traceback here in real application
-        raise HTTPException(status_code=500, detail=f"Internal server error while fetching constraints.")
-
-# Add other constraint-related endpoints here
+        # Catch any other unexpected errors
+        print(f"ROUTER: Unhandled error processing constraints request: {type(e).__name__} - {e}")
+        # Consider logging traceback
+        raise HTTPException(status_code=500, detail="Internal server error processing constraints request.")
