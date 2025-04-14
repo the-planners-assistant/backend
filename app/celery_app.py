@@ -2,6 +2,8 @@
 from celery import Celery
 from app.core.config import settings
 
+print(f"DEBUG: settings.REDIS_URL = '{settings.REDIS_URL}' (Type: {type(settings.REDIS_URL)})")
+
 # Initialize Celery
 # The first argument is the name of the current module (__name__ could work)
 # The 'broker' and 'backend' arguments point to your Redis instance using config

@@ -4,7 +4,8 @@ pydantic
 pydantic-settings # For loading .env files
 celery[redis] # Adds celery and redis client library
 asyncpg # Async driver for PostgreSQL
-
+google-genai # For now
+python-multipart # For file uploads
 
 # Add other dependencies as needed later:
 # SQLAlchemy

@@ -3,9 +3,12 @@ import asyncpg
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, HTTPException, status
 from typing import AsyncGenerator, Optional
+import logging # Import logging
 
 # Assuming settings load DB details from .env or environment vars
-from app.core.config import settings # Import the updated settings
+from app.core.config import settings
+
+logger = logging.getLogger(__name__) # Get logger instance
 
 # Global variable to hold the pool
 DB_POOL: Optional[asyncpg.Pool] = None
@@ -13,63 +16,71 @@ DB_POOL: Optional[asyncpg.Pool] = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Context manager for FastAPI lifespan events to manage the DB pool."""
+    global DB_POOL
     # --- Startup ---
-    print("INFO:     Attempting to create database connection pool...")
+    logger.info("Attempting to create database connection pool...")
     try:
-        global DB_POOL
         DB_POOL = await asyncpg.create_pool(
-            # *** Use the updated setting names from config.py ***
             user=settings.PGUSER,
             password=settings.PGPASSWORD,
             database=settings.PGDATABASE,
             host=settings.PGHOST,
             port=settings.PGPORT,
-            # --- Optional Pool Settings ---
-            min_size=1,  # Minimum number of connections in the pool
-            max_size=10 # Maximum number of connections in the pool
-            # You can add other asyncpg pool options here if needed
-            # e.g., command_timeout=60
+            min_size=1,
+            max_size=10
         )
         # Optional: Test connection on startup
-        # async with DB_POOL.acquire() as conn:
-        #    await conn.execute("SELECT 1")
+        async with DB_POOL.acquire() as conn:
+            db_version = await conn.fetchval("SELECT version()")
+            logger.debug(f"Database connection test successful. Version: {db_version}")
 
-        # *** Update print statement to use correct setting names ***
-        print(f"INFO:     Database connection pool created successfully for {settings.PGUSER}@{settings.PGHOST}:{settings.PGPORT}/{settings.PGDATABASE}")
+        logger.info(f"Database connection pool created successfully for {settings.PGUSER}@{settings.PGHOST}:{settings.PGPORT}/{settings.PGDATABASE}")
     except Exception as e:
-        print(f"FATAL:    Could not connect to database: {e}")
+        logger.critical(f"Could not connect to database pool: {e}", exc_info=True) # Use critical for startup failure
         DB_POOL = None # Ensure pool is None if creation failed
 
     yield # Application runs here
 
     # --- Shutdown ---
     if DB_POOL:
-        print("INFO:     Closing database connection pool...")
-        # Use close() for graceful shutdown
-        await DB_POOL.close()
-        print("INFO:     Database connection pool closed.")
+        logger.info("Closing database connection pool...")
+        try:
+            await DB_POOL.close()
+            logger.info("Database connection pool closed successfully.")
+        except Exception as e:
+            logger.error(f"Error closing database connection pool: {e}", exc_info=True)
+    else:
+        logger.warning("Database pool was not initialized, skipping closure.")
+
 
 # FastAPI Dependency to get a connection from the pool
 async def get_db_connection() -> AsyncGenerator[asyncpg.Connection, None]:
     """FastAPI dependency that yields an asyncpg connection from the pool."""
     if not DB_POOL:
-        print("ERROR:    get_db_connection called but DB_POOL is not initialized!") # Debug print
+        logger.error("get_db_connection called but DB_POOL is not initialized!")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Database connection pool is not available."
         )
 
+    connection: Optional[asyncpg.Connection] = None
     try:
         # Acquire a connection from the pool
-        async with DB_POOL.acquire() as connection:
-            print(f"DEBUG:    Connection {id(connection)} acquired from pool.") # Debug print
-            # The connection is automatically released back to the pool
-            # when the 'async with' block exits.
-            yield connection # Provide the connection to the endpoint/service
-            print(f"DEBUG:    Connection {id(connection)} released back to pool.") # Debug print
+        logger.debug("Acquiring connection from pool...")
+        connection = await DB_POOL.acquire()
+        logger.debug(f"Connection {id(connection)} acquired from pool.")
+        yield connection # Provide the connection to the endpoint/service
     except Exception as e:
-        print(f"ERROR:    Failed to acquire connection from pool: {e}")
+        logger.error(f"Failed to acquire connection from pool: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Failed to acquire database connection."
         )
+    finally:
+        if connection:
+            logger.debug(f"Releasing connection {id(connection)} back to pool.")
+            try:
+                await DB_POOL.release(connection)
+                logger.debug(f"Connection {id(connection)} released successfully.")
+            except Exception as e:
+                 logger.error(f"Error releasing connection {id(connection)}: {e}", exc_info=True)
