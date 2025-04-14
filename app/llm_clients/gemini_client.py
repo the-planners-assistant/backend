@@ -201,7 +201,7 @@ class GeminiClient(BaseLLMClient):
         item_map = {str(item.get('id')): item for item in items}
 
         try:
-            gen_kwargs = kwargs.copy(); gen_kwargs.setdefault('temperature', 0.1)
+            gen_kwargs = kwargs.copy(); gen_kwargs.setdefault('temperature', 1)
             logger.debug(f"Calling generate_content for reranking (Requesting JSON output). Kwargs: {gen_kwargs}")
 
             json_response = await self.generate_content(
