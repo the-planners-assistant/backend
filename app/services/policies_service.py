@@ -2,37 +2,39 @@
 import random
 import asyncio
 from typing import List
-import logging # Import logging
+import logging
 
 from app.models.schemas import LocationInput, PolicyInfo
 from app.data.mock_data import MOCK_POLICIES # Import mock data
-from app.llm_clients import get_llm_client # Import the factory
+from app.llm_clients import get_llm_client
+from app.utils.geo_utils import reverse_geocode # <-- IMPORT REVERSE GEOCODE
+from app.services.constraints_service import load_prompt_template # Reuse prompt loader
 
-logger = logging.getLogger(__name__) # Get logger instance
+logger = logging.getLogger(__name__)
+
+# Assume a similar prompt template exists: app/prompts/rerank_policies.txt
+# You'll need to create this file similar to rerank_constraints.txt
 
 async def get_policies_for_location(location: LocationInput) -> List[PolicyInfo]:
     """
-    Service function to retrieve relevant policies for a location.
-    Placeholder: Returns a random subset of mock policies, then re-ranks using JSON mode.
-    Replace mock fetching with actual DB lookup or AI policy analysis logic.
+    Service function to retrieve/infer policies, get address, re-rank using LLM.
+    Placeholder: Uses mock policies.
     """
     logger.info(f"Fetching policies for Lat: {location.lat}, Lon: {location.lon}")
-    # Simulate delay
-    fetch_delay = random.uniform(0.1, 0.3)
-    logger.debug(f"Simulating initial policy fetch delay: {fetch_delay:.2f}s")
-    await asyncio.sleep(fetch_delay)
 
-    # --- Start: Replace with actual logic ---
-    # Mock logic: Use all mock policies for demonstration
+    # --- Get Formatted Address ---
+    formatted_address = await reverse_geocode(location.lat, location.lon) # <-- CALL GEOCODE
+    logger.info(f"Formatted address from reverse geocode: {formatted_address}")
+
+    # --- Fetch/Infer initial policies ---
+    await asyncio.sleep(random.uniform(0.1, 0.3)) # Simulate work
+    # Replace with actual logic (DB lookup or maybe an initial LLM call to infer relevant policy IDs)
     initial_policies_data = MOCK_POLICIES
     logger.debug("Using mock data for initial policies.")
-    # --- End: Replace with actual logic ---
-
-    # Map initial results to Pydantic model
     initial_policies_list = [
         PolicyInfo(id=p["id"], description=p["description"]) for p in initial_policies_data
     ]
-    logger.info(f"Found {len(initial_policies_list)} initial policies.")
+    logger.info(f"Found/Inferred {len(initial_policies_list)} initial policies.")
 
     # --- Re-ranking Step ---
     if not initial_policies_list:
@@ -41,46 +43,56 @@ async def get_policies_for_location(location: LocationInput) -> List[PolicyInfo]
 
     try:
         logger.debug("Attempting to get re-ranking LLM client.")
-        rerank_client = get_llm_client(client_type="reranking")
-        items_to_rank = [p.model_dump() for p in initial_policies_list]
-        context = f"Relevance context: Planning policies for location lat={location.lat}, lon={location.lon}."
-        logger.debug(f"Context for re-ranking (truncated): {context[:150]}...")
+        rerank_client = get_llm_client(client_type="reranking") # Could be same client as constraints
 
-        logger.info(f"Calling re-ranking LLM ({rerank_client.model_name}) requesting JSON...")
-        # Call the abstract method - client handles JSON request & parsing
+        # --- Load Policy Reranking Prompt ---
+        # NOTE: Create 'rerank_policies.txt' in app/prompts/
+        # It should be similar to rerank_constraints.txt but tailored for policies
+        # and potentially using different context variables if needed.
+        try:
+             prompt_template = load_prompt_template("rerank_policies.txt") # ASSUMES THIS FILE EXISTS
+        except FileNotFoundError:
+             logger.error("Prompt template 'rerank_policies.txt' not found. Cannot re-rank policies.")
+             return initial_policies_list # Fallback if prompt missing
+
+        # Prepare context for the template
+        prompt_context = {
+            "latitude": location.lat,
+            "longitude": location.lon,
+            "formatted_address": formatted_address # <-- ADD ADDRESS TO CONTEXT
+            # Add proposal text here if available and needed for policy ranking
+        }
+
+        items_to_rank = [p.model_dump() for p in initial_policies_list]
+        logger.info(f"Calling policy re-ranking LLM ({rerank_client.model_name}) for {len(items_to_rank)} policies...")
+
         ranked_items_data = await rerank_client.rerank_items(
             items=items_to_rank,
-            context=context
-            # Example: pass temperature if needed kwargs={'temperature': 0.1}
+            prompt_template=prompt_template,
+            prompt_context=prompt_context
         )
-        logger.info(f"Re-ranking LLM returned {len(ranked_items_data)} potentially relevant items.")
+        logger.info(f"Policy re-ranking LLM returned {len(ranked_items_data)} potentially relevant policies.")
 
-        # Map re-ranked data back to PolicyInfo list
+        # --- Map re-ranked data back ---
         ranked_policies = []
         original_items_map = {item.id: item for item in initial_policies_list}
         processed_ids = set()
-
-        # ranked_items_data should be the list of dicts corresponding to the ranked IDs
         for item_data in ranked_items_data:
              item_id = item_data.get("id")
              if item_id in original_items_map and item_id not in processed_ids:
-                 logger.debug(f"Adding ranked item ID: {item_id}")
                  ranked_policies.append(original_items_map[item_id])
                  processed_ids.add(item_id)
              else:
-                 # This might happen if the LLM hallucinates an ID or repeats one
-                 logger.warning(f"Re-ranking post-processing encountered unknown/duplicate ID in LLM output: {item_id}")
+                 logger.warning(f"Policy re-ranking mapping encountered unknown/duplicate ID: {item_id}")
 
         logger.info(f"Final re-ranked policy count: {len(ranked_policies)}.")
         return ranked_policies
 
     except (ValueError, NotImplementedError) as config_err:
-         # Handle client configuration errors specifically
-         logger.error(f"LLM client configuration error for re-ranking: {config_err}", exc_info=False)
+         logger.error(f"LLM client configuration error for policy re-ranking: {config_err}", exc_info=False)
          logger.warning("Falling back to original policy order due to configuration error.")
          return initial_policies_list
     except Exception as e:
-         # Catch other unexpected errors during re-ranking call
          logger.exception("Unexpected error during policy re-ranking.")
          logger.warning("Falling back to original policy order due to unexpected error.")
-         return initial_policies_list # Fallback to unranked list
+         return initial_policies_list

@@ -3,10 +3,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 import os
 from pathlib import Path
 from typing import Optional
-import logging # For log level type hint
+import logging
 
-# Define the path to the .env file relative to this config file's location
-# Assumes .env is in the 'backend' directory
 env_path = Path(__file__).parent.parent.parent / ".env"
 
 class Settings(BaseSettings):
@@ -14,43 +12,40 @@ class Settings(BaseSettings):
     API_V1_STR: str = "/api/v1"
 
     # --- Logging ---
-    LOG_LEVEL: str = "INFO" # Default log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+    LOG_LEVEL: str = "INFO"
+
+    # --- Google Cloud APIs ---
+    GOOGLE_GEOCODE_API_KEY: Optional[str] = None
+    # Add key for Maps Static/Street View (can often be same as Geocode key if APIs enabled)
+    MAPS_STATIC_API_KEY: Optional[str] = None 
 
     # --- Database Configuration ---
     PGHOST: str = "localhost"
     PGPORT: int = 5432
-    PGDATABASE: str = "mydatabase" # Default if not in .env
-    PGUSER: str = "postgres"     # Default if not in .env
-    PGPASSWORD: str = "password"   # Default if not in .env
-    PGSCHEMA: str = "public"     # Default if not in .env
+    PGDATABASE: str = "mydatabase"
+    PGUSER: str = "postgres"
+    PGPASSWORD: str = "password"
+    PGSCHEMA: str = "public"
 
     # --- Redis Configuration ---
-    REDIS_URL: str = "redis://localhost:6379/0" # Load from .env
+    REDIS_URL: str = "redis://localhost:6379/0"
 
     # --- LLM Configuration ---
     GEMINI_API_KEY: Optional[str] = None
-
-    # --- Re-ranking LLM ---
     RERANKING_LLM_MODEL_NAME: str = "gemini-2.0-flash"
-
-    # --- Reporting LLM ---
-    REPORTING_LLM_MODEL_NAME: str = "gemini-2.5-pro"
+    REPORTING_LLM_MODEL_NAME: str = "gemini-2.5-pro-preview-03-25"
 
     # --- Other Settings ---
-    # Add other settings here
 
-    # Load settings from .env file
     model_config = SettingsConfigDict(
         env_file=str(env_path),
         env_file_encoding='utf-8',
         extra='ignore',
-        case_sensitive=False, # Allow overriding LOG_LEVEL with lowercase env var
+        case_sensitive=False,
     )
 
-# Create a single instance of the settings to be imported elsewhere
 settings = Settings()
 
-# Helper function to get numeric log level
 def get_log_level() -> int:
     level_str = settings.LOG_LEVEL.upper()
     return getattr(logging, level_str, logging.INFO)

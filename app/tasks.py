@@ -2,159 +2,146 @@
 import time
 import random
 import asyncio
-from typing import List, Dict, Any, Optional # Added Optional
-import logging # Import logging
-import json # For potential JSON processing if needed later
-import traceback
+from typing import List, Dict, Any, Optional, Union
+import logging
+import json
+from pathlib import Path
 
 from app.celery_app import celery_app
-from app.models import schemas
-from app.llm_clients import get_llm_client, BaseLLMClient # Import factory and base class
-from google.genai import types # Import SDK types for constructing content parts
+from app.models import schemas # Import all schemas needed
+from app.llm_clients import get_llm_client, BaseLLMClient
+# google.genai.types not needed for Part creation
+from pydantic import ValidationError, TypeAdapter # Keep for validation
 
-logger = logging.getLogger(__name__) # Get logger instance
+try:
+    from app.services.constraints_service import load_prompt_template
+except ImportError:
+    PROMPT_DIR_TASK = Path(__file__).parent / "prompts"
+    logger_tp = logging.getLogger(__name__ + ".load_prompt_template")
+    def load_prompt_template(template_name: str) -> str:
+        filepath = PROMPT_DIR_TASK / template_name
+        logger_tp.debug(f"Attempting to load prompt template from: {filepath}")
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f: return f.read()
+        except Exception as e:
+            logger_tp.error(f"Task Error loading prompt {filepath}: {e}")
+            raise
 
-# Helper function to safely truncate strings for logging
+logger = logging.getLogger(__name__)
+
 def truncate_string(s: Optional[str], max_len: int = 100) -> Optional[str]:
-    if s is None:
-        return None
+    if s is None: return None
     return s[:max_len] + "..." if len(s) > max_len else s
 
-# Hypothetical function containing the actual heavy lifting
-async def _run_actual_complex_generation(report_input: schemas.ReportInput, task_id: str, aerial_photo_uri: Optional[str] = None, aerial_photo_mime_type: Optional[str] = None) -> dict:
-    """Placeholder for the real time-consuming report generation logic using the reporting LLM."""
-    logger.info(f"TASK [{task_id}]: Starting complex generation. Photo included: {'Yes' if aerial_photo_uri else 'No'}")
-    logger.debug(f"TASK [{task_id}]: Input proposal (truncated): {truncate_string(report_input.proposal_text)}")
-    if aerial_photo_uri:
-        logger.debug(f"TASK [{task_id}]: Aerial photo URI: {aerial_photo_uri}, MimeType: {aerial_photo_mime_type}")
+async def run_report_generation(task_input: schemas.ReportTaskInput, task_id: str) -> dict:
+    """
+    Performs report generation using reporting LLM, requesting JSON mime type output
+    and manually parsing/validating it against ReportData schema.
+    """
+    logger.info(f"TASK [{task_id}]: Starting report generation.")
+    logger.debug(f"TASK [{task_id}]: Address: {task_input.formatted_address}")
+    logger.debug(f"TASK [{task_id}]: Aerial URI: {task_input.aerial_photo_uri}")
+    logger.debug(f"TASK [{task_id}]: Street View URI: {task_input.street_view_photo_uri}")
 
-    # Simulate some initial data fetching or processing
-    await asyncio.sleep(random.uniform(0.5, 1.0))
-
-    # --- Use the Reporting LLM ---
-    proposal_summary = "Error generating summary"
-    ai_explanation = "Error generating explanation"
-    # Use mock data as fallback, replace with actual analysis results
-    constraints_analysis_list = [{"id": "gb1", "name": "Green Belt", "status": "Present"}]
-    policy_analysis_list = [{"id": "HOU1", "relevance_score": 0.8, "reasoning": "Relevant."}]
+    error_report_data = schemas.ReportData( request=task_input.request, proposal_summary="Error: Failed.", constraints_analysis=[], relevant_policies=[], ai_explanation="Error: Initial task failure.")
+    final_report_dict = error_report_data.model_dump()
 
     try:
         logger.debug(f"TASK [{task_id}]: Getting reporting LLM client.")
         reporting_client = get_llm_client(client_type="reporting")
         logger.info(f"TASK [{task_id}]: Using reporting model: {reporting_client.model_name}")
 
-        # --- Construct Prompt Content ---
-        # Start with text parts
-        prompt_parts: List[Any] = [
-            f"Generate planning report sections for a development proposal at lat={report_input.lat}, lon={report_input.lon}.\n",
-            f"Proposal Description: {report_input.proposal_text}\n\n"
-        ]
+        logger.debug(f"TASK [{task_id}]: Loading report generation prompt template.")
+        prompt_template = load_prompt_template("generate_report.txt") # Use prompt asking for specific JSON structure
 
-        # Add aerial photo if available
-        if aerial_photo_uri and aerial_photo_mime_type:
-             logger.debug(f"TASK [{task_id}]: Adding aerial photo part to prompt contents.")
-             # Ensure the file URI is valid and accessible by the model
-             # Use types.Part.from_uri for files uploaded via File API
-             prompt_parts.append(types.Part.from_uri(uri=aerial_photo_uri, mime_type=aerial_photo_mime_type))
-             prompt_parts.append("\nAnalyze the aerial photo in the context of the proposal.\n") # Add instruction related to photo
+        # Prepare Prompt Context (includes image URIs in text)
+        constraints_json_string = json.dumps([c.model_dump() for c in task_input.ranked_constraints], indent=2)
+        policies_json_string = json.dumps([p.model_dump() for p in task_input.ranked_policies], indent=2)
+        aerial_photo_context_str = f"\n- Aerial Photo URI: {task_input.aerial_photo_uri}" if task_input.aerial_photo_uri else ""
+        street_view_photo_context_str = f"\n- Street View URI: {task_input.street_view_photo_uri}" if task_input.street_view_photo_uri else ""
+        proposal_text_for_prompt = task_input.request.proposal_text or ""
+        prompt_context = { "latitude": task_input.request.lat, "longitude": task_input.request.lon, "formatted_address": task_input.formatted_address or "Not Available", "proposal_text": proposal_text_for_prompt, "constraints_json": constraints_json_string, "policies_json": policies_json_string, "aerial_photo_context": aerial_photo_context_str, "street_view_photo_context": street_view_photo_context_str }
+        final_prompt_text = prompt_template.format(**prompt_context)
+        logger.debug(f"TASK [{task_id}]: Final report prompt length: {len(final_prompt_text)}")
 
-        # --- Example LLM Calls ---
-        # 1. Summarize Proposal (using potentially multimodal input)
-        logger.debug(f"TASK [{task_id}]: Generating proposal summary.")
-        # Add specific instruction for summary
-        summary_instruction = "First, provide a concise summary of the development proposal described above (and shown in the image, if provided)."
-        summary_contents = prompt_parts + [summary_instruction]
+        # Prepare Content List (TEXT ONLY - URIs are in the text prompt)
+        llm_contents: list[str] = [final_prompt_text]
 
-        summary_result = await reporting_client.generate_content(summary_contents, temperature=0.5)
-        proposal_summary = summary_result if isinstance(summary_result, str) else "Summary Error (Type Mismatch)"
-        logger.info(f"TASK [{task_id}]: Generated proposal summary (truncated): {truncate_string(proposal_summary)}")
-        await asyncio.sleep(random.uniform(0.5, 1.0)) # Simulate work
+        # --- Call LLM requesting JSON mime type, NO schema enforcement by API ---
+        logger.info(f"TASK [{task_id}]: Calling reporting LLM for report components (manual parse)...")
+        llm_output_dict = await reporting_client.generate_content(
+            prompt=llm_contents,
+            stream=False,
+            output_json=True, # Request JSON mime type + trigger manual parse in client
+            # response_schema=... REMOVED
+            temperature=0.6
+        )
 
-        # 2. Generate AI Explanation
-        logger.debug(f"TASK [{task_id}]: Generating AI explanation.")
-        # Assume constraints/policies fetched and passed somehow, or use placeholders
-        explanation_prompt_parts = prompt_parts + [ # Reuse initial context + photo if available
-             "\nNow, generate a concise explanation of the key planning considerations for the proposal, considering the following constraints and policies:\n",
-             f"Constraints:\n" + "\n".join([f"- {c['name']} ({c['status']})" for c in constraints_analysis_list]) + "\n",
-             f"Relevant Policies:\n" + "\n".join([f"- {p['id']}: Score {p['relevance_score']}" for p in policy_analysis_list]) + "\n",
-             "Focus on potential conflicts and opportunities highlighted by the proposal, constraints, policies (and aerial photo, if provided)."
-        ]
-        explanation_result = await reporting_client.generate_content(explanation_prompt_parts, temperature=0.6)
-        ai_explanation = explanation_result if isinstance(explanation_result, str) else "Explanation Error (Type Mismatch)"
-        logger.info(f"TASK [{task_id}]: Generated AI explanation (truncated): {truncate_string(ai_explanation)}")
-        await asyncio.sleep(random.uniform(0.5, 1.0)) # Simulate work
+        # --- Process Response (should be dictionary) ---
+        if not isinstance(llm_output_dict, dict):
+             logger.error(f"TASK [{task_id}]: Reporting LLM did not return a JSON dictionary. Type: {type(llm_output_dict)}")
+             raise ValueError("LLM response was not a valid JSON dictionary.")
+        else:
+             logger.info(f"TASK [{task_id}]: Successfully received and parsed JSON dictionary from LLM.")
+             # --- Manually Validate and Construct ReportData ---
+             logger.debug("Manually validating LLM output dictionary against ReportData schema...")
+             try:
+                  # Validate the entire dict against the final ReportData schema
+                  final_report_obj = schemas.ReportData(**llm_output_dict)
+                  # Convert the validated object to dict for Celery/JSON result
+                  final_report_dict = final_report_obj.model_dump()
+                  logger.info(f"TASK [{task_id}]: Successfully validated LLM output and constructed ReportData.")
 
-        # --- TODO: Add actual constraint/policy analysis logic ---
+             except ValidationError as e:
+                  logger.error(f"TASK [{task_id}]: Pydantic validation failed for LLM output dictionary: {e}", exc_info=True)
+                  logger.error(f"TASK [{task_id}]: LLM Output causing validation error: {llm_output_dict}")
+                  # Use default error dict but update explanation
+                  final_report_dict['ai_explanation'] = f"Error: LLM output failed validation against ReportData schema ({e})."
+                  # Keep request field from original input
+                  final_report_dict['request'] = task_input.request.model_dump()
+             except Exception as const_err:
+                  logger.exception(f"TASK [{task_id}]: Error constructing final ReportData object from dict.")
+                  # Use default error dict but update explanation
+                  final_report_dict['ai_explanation'] = f"Error: Failed during final report construction ({type(const_err).__name__})."
+                  final_report_dict['request'] = task_input.request.model_dump()
 
-
+    # --- Outer Error Handling ---
+    except FileNotFoundError as fnf_err:
+        logger.exception(f"TASK [{task_id}]: Prompt template file not found.")
+        final_report_dict['ai_explanation'] = f"Error: Report generation prompt template not found ({fnf_err})."
+        final_report_dict['request'] = task_input.request.model_dump()
+    except ValueError as ve: # Catch errors from LLM call or manual JSON parse
+        logger.exception(f"TASK [{task_id}]: Value error during report generation LLM call or parsing.")
+        # Include the ValueError message in the explanation
+        final_report_dict['ai_explanation'] = f"Error: Failed during LLM call or response parsing ({ve})."
+        final_report_dict['request'] = task_input.request.model_dump()
     except Exception as e:
-         logger.exception(f"TASK [{task_id}]: Error during LLM interaction.")
-         # Keep previously set error messages or placeholders
+        logger.exception(f"TASK [{task_id}]: Unexpected error during report generation.")
+        final_report_dict['ai_explanation'] = f"Error: An unexpected error occurred ({type(e).__name__})."
+        final_report_dict['request'] = task_input.request.model_dump()
 
-    # Structure report dictionary
-    report_dict = {
-         "request": report_input.model_dump(),
-         "proposal_summary": proposal_summary,
-         "constraints_analysis": constraints_analysis_list, # Replace with actual analysis results
-         "ai_explanation": ai_explanation,
-         "relevant_policies": policy_analysis_list # Replace with actual analysis results
-     }
-    logger.info(f"TASK [{task_id}]: Finished complex generation logic.")
-    return report_dict
+
+    logger.info(f"TASK [{task_id}]: Report generation finished.")
+    return final_report_dict # Return the dictionary
 
 
 @celery_app.task(bind=True, name="generate_report_task")
-def generate_report_task(self, report_input_dict: dict) -> dict:
-    """
-    Celery task to generate the planning report asynchronously.
-    Accepts and returns serializable dicts. Can handle optional aerial photo info.
-    """
+def generate_report_task(self, task_input_dict: dict) -> dict:
+    # (Wrapper function remains the same)
     task_id = self.request.id or "unknown_task"
-    logger.info(f"TASK [{task_id}]: Received report generation request.")
-    logger.debug(f"TASK [{task_id}]: Raw input dict keys: {list(report_input_dict.keys())}")
-
-    # Extract potential aerial photo info BEFORE creating the base ReportInput model
-    aerial_photo_uri = report_input_dict.pop("aerial_photo_uri", None)
-    aerial_photo_mime_type = report_input_dict.pop("aerial_photo_mime_type", None)
-    # aerial_photo_name = report_input_dict.pop("aerial_photo_name", None) # Optional: Use if needed
-
+    logger.info(f"TASK [{task_id}]: Celery task received request.")
+    logger.debug(f"TASK [{task_id}]: Raw input dict keys: {list(task_input_dict.keys())}")
     try:
-        # Create the Pydantic model from the remaining dict keys
-        report_input = schemas.ReportInput(**report_input_dict)
-        logger.info(f"TASK [{task_id}]: Parsed input. Proposal (truncated): {truncate_string(report_input.proposal_text)}. Photo URI present: {'Yes' if aerial_photo_uri else 'No'}")
-
-        # Run the async generation logic using asyncio.run()
-        # Pass extracted photo info to the generation function
-        result_data = asyncio.run(
-            _run_actual_complex_generation(
-                report_input=report_input,
-                task_id=task_id,
-                aerial_photo_uri=aerial_photo_uri,
-                aerial_photo_mime_type=aerial_photo_mime_type
-            )
-        )
-
-        logger.info(f"TASK [{task_id}]: Report generation logic completed successfully.")
+        task_input = schemas.ReportTaskInput(**task_input_dict)
+        logger.debug(f"TASK [{task_id}]: Successfully parsed ReportTaskInput.")
+        result_data = asyncio.run(run_report_generation(task_input, task_id))
+        logger.info(f"TASK [{task_id}]: Celery task completed successfully.")
         return result_data
     except Exception as e:
         logger.exception(f"TASK [{task_id}]: Unhandled error during task execution.")
-        # Update task state with error details
+        import traceback
         self.update_state(
             state='FAILURE',
-            meta={'exc_type': type(e).__name__, 'exc_message': str(e), 'traceback': traceback.format_exc()} # Include traceback if possible
+            meta={'exc_type': type(e).__name__, 'exc_message': str(e), 'traceback': traceback.format_exc()}
         )
-        # Reraise exception for Celery to record failure status
-        raise # Reraises the caught exception
-    finally:
-        # --- Optional: Clean up uploaded file ---
-        # Requires passing file name and using the client again
-        # Be careful with error handling here
-        # if aerial_photo_name:
-        #     try:
-        #         logger.warning(f"TASK [{task_id}]: Attempting to delete uploaded file: {aerial_photo_name}")
-        #         # Need to get client instance again
-        #         # file_cleanup_client = get_llm_client(...)
-        #         # await file_cleanup_client.delete_file(name=aerial_photo_name) # Assumes delete_file method exists
-        #     except Exception as cleanup_err:
-        #         logger.error(f"TASK [{task_id}]: Failed to delete uploaded file {aerial_photo_name}: {cleanup_err}")
-        logger.debug(f"TASK [{task_id}]: generate_report_task finished.")
+        raise

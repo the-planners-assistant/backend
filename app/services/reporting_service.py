@@ -2,96 +2,99 @@
 from app.models import schemas
 from app.tasks import generate_report_task
 from celery.result import AsyncResult
-import logging # Import logging
-from typing import Optional # For optional types
-from io import BytesIO # For file data
+import logging
+from typing import Optional
+from io import BytesIO
+import asyncpg
+from fastapi import Depends
 
-logger = logging.getLogger(__name__) # Get logger instance
+from app.services import constraints_service, policies_service
+from app.db import get_db_connection
+from app.llm_clients import get_llm_client
+from app.utils.geo_utils import reverse_geocode, get_static_map_image, get_street_view_image
+import asyncio # Import asyncio
 
-# --- Function for text-only report ---
-async def trigger_report_generation(report_input: schemas.ReportInput) -> str:
-    """
-    Service function to trigger the asynchronous report generation task (text only).
-    Returns the task ID.
-    """
-    logger.info(f"Triggering text-only report generation task for lat={report_input.lat}, lon={report_input.lon}")
-    # Log truncated proposal text
-    proposal_preview = report_input.proposal_text[:100] + "..." if report_input.proposal_text and len(report_input.proposal_text) > 100 else report_input.proposal_text or "N/A"
-    logger.debug(f"Proposal preview: {proposal_preview}")
+logger = logging.getLogger(__name__)
 
+async def _upload_image_to_gemini(image_bytes: bytes, mime_type: str, display_name: str) -> Optional[str]:
+    # (Helper function remains the same)
+    if not image_bytes: return None
     try:
-        # Send task to the queue. Pass data as a serializable dict using .model_dump()
-        # Ensure all data within report_input is JSON-serializable
-        task = generate_report_task.delay(report_input.model_dump())
-        logger.info(f"Task {task.id} enqueued successfully.")
-        return task.id
-    except Exception as e:
-        logger.exception(f"Failed to enqueue report generation task for {report_input.lat},{report_input.lon}")
-        # Re-raise or handle appropriately depending on desired API behavior
-        raise
+        upload_client = get_llm_client(client_type="reporting")
+        image_data = BytesIO(image_bytes)
+        uploaded_file_obj = await upload_client.upload_file(file_data=image_data, mime_type=mime_type, display_name=display_name)
+        return uploaded_file_obj.uri
+    except Exception as e: logger.error(f"Failed upload {display_name}: {e}", exc_info=True); return None
 
 
-# --- Conceptual function for report with photo ---
-# NOTE: This function needs implementation details for file handling & task modification
-async def trigger_report_generation_with_photo(
+async def trigger_report_generation(
     report_input: schemas.ReportInput,
-    photo_data: BytesIO,
-    photo_mime_type: str
-) -> str:
+    conn: asyncpg.Connection # Accept connection as argument
+    ) -> str:
     """
-    Service function to trigger asynchronous report generation including a photo.
-    (Needs implementation: Upload photo, pass file info to task)
-    Returns the task ID.
+    Gets address, fetches images, uploads images, fetches/ranks constraints & policies,
+    then triggers the async report task with image URIs.
     """
-    logger.info(f"Triggering report generation task with photo for lat={report_input.lat}, lon={report_input.lon}")
-    logger.debug(f"Received photo data, mime_type: {photo_mime_type}")
+    task_id = "error_task_id"
+    logger.info(f"Service: Starting report generation process for lat={report_input.lat}, lon={report_input.lon}")
+    aerial_uri: Optional[str] = None
+    street_uri: Optional[str] = None
 
-    uploaded_file_uri = None
-    uploaded_file_name = None
     try:
-        # --- Upload Photo using LLM Client ---
-        # Needs the LLM client factory here too
-        from app.llm_clients import get_llm_client
-        # Decide which client handles uploads (reporting or a general one?)
-        # Let's assume the reporting client can upload
-        upload_client = get_llm_client(client_type="reporting") # Or a dedicated upload client/service
-        logger.debug("Uploading photo using LLM client...")
+        # --- Parallel Fetching (Address & Images) ---
+        logger.debug("Fetching address and images concurrently...")
+        address_task = asyncio.create_task(reverse_geocode(report_input.lat, report_input.lon))
+        aerial_task = asyncio.create_task(get_static_map_image(report_input.lat, report_input.lon))
+        street_task = asyncio.create_task(get_street_view_image(report_input.lat, report_input.lon))
 
-        # Use a meaningful display name if possible
-        display_name = f"aerial_photo_{report_input.lat}_{report_input.lon}.png" # Example name
-
-        uploaded_file_obj = await upload_client.upload_file(
-            file_data=photo_data,
-            mime_type=photo_mime_type,
-            display_name=display_name
+        formatted_address, aerial_bytes, street_bytes = await asyncio.gather(
+            address_task, aerial_task, street_task
         )
-        uploaded_file_uri = uploaded_file_obj.uri
-        uploaded_file_name = uploaded_file_obj.name
-        logger.info(f"Photo uploaded successfully via File API: URI={uploaded_file_uri}, Name={uploaded_file_name}")
+        logger.info(f"Formatted address: {formatted_address}")
+        logger.info(f"Fetched aerial image: {len(aerial_bytes) if aerial_bytes else 'No'} bytes.")
+        logger.info(f"Fetched street view image: {len(street_bytes) if street_bytes else 'No'} bytes.")
 
-        # --- Prepare Task Input ---
-        # Add file information to the data sent to the Celery task
-        report_input_dict = report_input.model_dump()
-        report_input_dict["aerial_photo_uri"] = uploaded_file_uri
-        report_input_dict["aerial_photo_mime_type"] = photo_mime_type
-        report_input_dict["aerial_photo_name"] = uploaded_file_name # Pass name for potential deletion later?
+        # --- Parallel Uploading ---
+        logger.debug("Uploading images to Gemini File API concurrently...")
+        aerial_upload_task = asyncio.create_task(
+            _upload_image_to_gemini(aerial_bytes, "image/jpeg", f"aerial_{report_input.lat}_{report_input.lon}.jpg")
+        ) if aerial_bytes else asyncio.create_task(asyncio.sleep(0, result=None))
+        street_upload_task = asyncio.create_task(
+             _upload_image_to_gemini(street_bytes, "image/jpeg", f"street_{report_input.lat}_{report_input.lon}.jpg")
+        ) if street_bytes else asyncio.create_task(asyncio.sleep(0, result=None))
+
+        # --- Parallel Dependency Fetching ---
+        logger.debug("Fetching and ranking constraints & policies concurrently...")
+        constraints_task = asyncio.create_task( constraints_service.get_constraints_for_location( location=schemas.LocationInput(lat=report_input.lat, lon=report_input.lon), conn=conn ))
+        policies_task = asyncio.create_task( policies_service.get_policies_for_location( location=schemas.LocationInput(lat=report_input.lat, lon=report_input.lon) ))
+
+        # --- Gather all results ---
+        aerial_uri, street_uri, ranked_constraints, ranked_policies = await asyncio.gather(
+             aerial_upload_task, street_upload_task, constraints_task, policies_task
+        )
+        logger.info(f"Fetched/Ranked {len(ranked_constraints)} constraints and {len(ranked_policies)} policies.")
+        logger.info(f"Aerial URI: {aerial_uri}, Street View URI: {street_uri}")
+
+        # --- Prepare Input for Celery Task ---
+        # Remove mime types as they are not used in the task anymore
+        task_input_data = schemas.ReportTaskInput(
+            request=report_input,
+            formatted_address=formatted_address,
+            ranked_constraints=ranked_constraints,
+            ranked_policies=ranked_policies,
+            aerial_photo_uri=aerial_uri,
+            street_view_photo_uri=street_uri
+        )
 
         # --- Enqueue Task ---
-        logger.debug(f"Enqueuing task with photo URI: {uploaded_file_uri}")
-        # *** IMPORTANT: Ensure generate_report_task in tasks.py can handle these new keys ***
-        task = generate_report_task.delay(report_input_dict)
-        logger.info(f"Task {task.id} with photo enqueued successfully.")
-        return task.id
+        logger.debug("Enqueueing generate_report_task...")
+        task = generate_report_task.delay(task_input_data.model_dump())
+        task_id = task.id
+        logger.info(f"Task {task_id} enqueued successfully.")
+        return task_id
 
     except Exception as e:
-        # Log exception during upload or enqueueing
-        logger.exception(f"Failed during report generation triggering with photo for {report_input.lat},{report_input.lon}")
-        # Optional: Attempt to delete the uploaded file if enqueueing failed? Requires file name.
-        # if uploaded_file_name:
-        #     logger.warning(f"Attempting to clean up uploaded file {uploaded_file_name} due to error.")
-        #     # Add cleanup logic if needed...
-        raise # Re-raise the error to be caught by the router
+        logger.exception(f"Failed during report generation service execution for {report_input.lat},{report_input.lon}")
+        raise
 
-
-# The actual long-running logic (_run_actual_complex_generation) resides
-# conceptually within or is called by the Celery task defined in app/tasks.py
+# (trigger_report_generation_with_photo removed as this function now handles optional images)

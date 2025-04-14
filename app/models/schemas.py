@@ -1,66 +1,51 @@
 # app/models/schemas.py
-from pydantic import BaseModel, Field
-from typing import List, Optional, Any # Import Any for task result
+from pydantic import BaseModel, Field, TypeAdapter
+from typing import List, Optional, Any, Dict
 
 # --- Input Models ---
-
-class LocationInput(BaseModel):
+class LocationInput(BaseModel): lat: float; lon: float
+class ReportInput(BaseModel):
     lat: float
     lon: float
-
-class ReportInput(LocationInput):
+    # Revert to Optional - allows None input, task handles conversion to "" for prompt
     proposal_text: Optional[str] = Field(default=None, description="Description of the proposed development")
 
 # --- Data/Info Models ---
-
-class ConstraintInfo(BaseModel):
-    id: str
-    name: str
-    type: str = Field(description="e.g., 'Statutory', 'Local Policy'")
-    explanation_available: bool = False
-
-class PolicyInfo(BaseModel):
-    id: str
-    description: str
-
-class ReportConstraintAnalysis(BaseModel):
-    id: str
-    name: str
-    status: str = Field(description="e.g., 'Present', 'Not Present', 'Potential Conflict'")
-    explanation_available: bool = False
-
-class ReportPolicyAnalysis(BaseModel):
-    id: str
-    relevance_score: float
-    reasoning: str = Field(description="Why this policy is relevant")
+class ConstraintInfo(BaseModel): id: str; name: str; type: str; explanation_available: bool
+class PolicyInfo(BaseModel): id: str; description: str
 
 # --- Response Models ---
+class ConstraintsResponse(BaseModel): location: LocationInput; constraints: List[ConstraintInfo]
+class PoliciesResponse(BaseModel): location: LocationInput; policies: List[PolicyInfo]
 
-class ConstraintsResponse(BaseModel):
-    location: LocationInput
-    constraints: List[ConstraintInfo]
+# --- Internal Task Input Model ---
+class ReportTaskInput(BaseModel):
+    request: ReportInput
+    formatted_address: Optional[str] = None
+    ranked_constraints: List[ConstraintInfo]
+    ranked_policies: List[PolicyInfo]
+    aerial_photo_uri: Optional[str] = None
+    street_view_photo_uri: Optional[str] = None
+    # Mime types can remain removed
 
-class PoliciesResponse(BaseModel):
-    location: LocationInput
-    policies: List[PolicyInfo]
+# --- Reporting Output Models ---
+class ReportConstraintAnalysis(BaseModel): id: str; name: str; status: str; explanation_available: bool
+class ReportPolicyAnalysis(BaseModel): id: str; relevance_score: float; reasoning: str
 
+# ReportData is now the target for manual validation inside the task
 class ReportData(BaseModel):
     request: ReportInput
     proposal_summary: str
     constraints_analysis: List[ReportConstraintAnalysis]
-    ai_explanation: str
     relevant_policies: List[ReportPolicyAnalysis]
+    ai_explanation: str
 
-# Response model when triggering a background task
-class AsyncTaskResponse(BaseModel):
-    task_id: str
-    status: str = "PENDING"
+# --- LLMReportOutputSchema REMOVED ---
 
-# Response model for checking task status
-class TaskStatusResponse(BaseModel):
-    task_id: str
-    status: str # Celery states: PENDING, STARTED, SUCCESS, FAILURE, RETRY, REVOKED
-    result: Optional[Any] = None # Store result (can be dict matching ReportData or other)
-    error: Optional[str] = None # Store error message if failed
+# --- Task Status Models ---
+class AsyncTaskResponse(BaseModel): task_id: str; status: str = "PENDING"
+class TaskStatusResponse(BaseModel): task_id: str; status: str; result: Optional[ReportData] = None; error: Optional[str] = None
 
-# Add other schemas as needed, e.g., for explanations, scenarios etc.
+# --- Type Adapters REMOVED (now validating full ReportData) ---
+# ConstraintsAnalysisList = TypeAdapter(List[ReportConstraintAnalysis])
+# PoliciesAnalysisList = TypeAdapter(List[ReportPolicyAnalysis])

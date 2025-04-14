@@ -4,11 +4,12 @@ pydantic
 pydantic-settings # For loading .env files
 celery[redis] # Adds celery and redis client library
 asyncpg # Async driver for PostgreSQL
-google-genai # For now
-python-multipart # For file uploads
+google-genai # Correct Google GenAI SDK
+requests # For sync calls if needed, or legacy
+httpx # Preferred async HTTP client
+Pillow # For image handling (optional but good to have)
 
 # Add other dependencies as needed later:
 # SQLAlchemy
 # GeoAlchemy2
-# requests # For calling external APIs
 # openai # Or other AI library clients
